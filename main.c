@@ -38,19 +38,19 @@ void *alloc(u64 size) {
 }
 
 b8 is_space(u8 c) {
-    return 
+    return
         c == ' ' ||
         c == '\n' ||
         c == '\t';
 }
 
 b8 is_num(u8 c) {
-    return 
+    return
         '0' <= c && c <= '9';
 }
 
 b8 is_alpha(u8 c) {
-    return 
+    return
         ('a' <= c && c <= 'z') ||
         ('A' <= c && c <= 'Z') ;
 }
@@ -71,7 +71,7 @@ b8 str_eq(str a, str b) {
 b8 str_index_of(str haystack, str needle, u64 *where) {
     for(u64 i=0;(i+needle.len)<=haystack.len;i++) {
         if(memcmp(haystack.data + i, needle.data, needle.len) == 0) {
-            *where = i; 
+            *where = i;
             return True;
         }
     }
@@ -85,7 +85,7 @@ b8 str_starts_with(str haystack, str prefix) {
 }
 
 str str_trim_left(str s) {
-    
+
     while(0 < s.len && is_space(*s.data)) {
         s.data += 1;
         s.len  -= 1;
@@ -95,7 +95,7 @@ str str_trim_left(str s) {
 }
 
 str str_trim_right(str s) {
-    
+
     while(0 < s.len && is_space(s.data[s.len - 1])) {
         s.len -= 1;
     }
@@ -143,7 +143,7 @@ typedef enum {
 } Kind;
 
 struct Value {
-    
+
     Kind kind;
     union {
         b8 boolean;
@@ -158,7 +158,7 @@ struct Value {
 static Value *__free_values = NULL;
 
 Value *value_alloc(void) {
-    
+
     Value *value;
     if(__free_values) {
         value = __free_values;
@@ -167,24 +167,42 @@ Value *value_alloc(void) {
         value = alloc(sizeof(*value));
     }
     value->next = NULL;
-    
+
     return value;
 }
 
 void value_free(Value *value) {
 
     switch(value->kind) {
-        case KIND_STRING: {
-            //
+
+        case KIND_BOOLEAN: {
         } break;
+
+        case KIND_STRING: {
+            // pass
+        } break;
+
+        case KIND_OBJECT:
+        case KIND_ARRAY: {
+            Value *curr = value->as.object;
+
+            while(curr) {
+                Value *next = curr->next;
+                curr->next = NULL;
+                value_free(curr);
+                curr = next;
+            }
+
+        } break;
+
         default:
             todo();
     }
-    
+
     if(value->next) todo();
     value->next = __free_values;
     __free_values = value;
-    
+
 }
 
 Value *value_boolean(b8 boolean) {
@@ -215,7 +233,7 @@ Value *value_array_push_single(Value *array, Value *value) {
 }
 
 Value *value_array_push_many(
-        Value *array, 
+        Value *array,
         ... /* Value *value1, Value *value2, NULL */ ) {
 
     va_list args;
@@ -255,8 +273,8 @@ Value *value_object(void) {
 }
 
 Value *value_object_push(Value *object, str key, Value *value) {
-    value_array_push(object, value); 
-    value_array_push(object, value_string(key)); 
+    value_array_push(object, value);
+    value_array_push(object, value_string(key));
     return object;
 }
 
@@ -276,7 +294,7 @@ Value *value_object_get(Value *object, str name) {
             return value;
         }
 
-    } 
+    }
 
     return NULL;
 }
@@ -289,6 +307,9 @@ b8 value_object_contains_key(Value *object, str name) {
 Value *value_copy(Value *value) {
 
     switch(value->kind) {
+        case KIND_BOOLEAN: {
+            return value_boolean(value->as.boolean);
+        } break;
         case KIND_STRING: {
             return value_string(value->as.string);
         } break;
@@ -297,13 +318,32 @@ Value *value_copy(Value *value) {
 
             Value *curr = value->as.object;
             while(curr) {
-    
+
+                Value *key = curr;
+                curr = curr->next;
+
                 value_array_push(object, value_copy(curr));
-        
+                value_array_push(object, value_copy(key));
+
                 curr = curr->next;
             }
-    
+
             return object;
+        } break;
+        case KIND_ARRAY: {
+
+            Value *array = value_array();
+
+            Value *curr = value->as.array;
+            while(curr) {
+
+                value_array_push(array, value_copy(curr));
+
+                curr = curr->next;
+            }
+
+            return array;
+
         } break;
         default:
             todo();
@@ -331,7 +371,7 @@ void str_builder_append(str_builder *sb, str s) {
     node->next = NULL;
 
     if(sb->head) {
-        sb->tail->next = node;    
+        sb->tail->next = node;
         sb->tail = node;
     } else {
         sb->head = node;
@@ -401,7 +441,7 @@ void content_expect_empty(str content) {
 }
 
 b8 find_content(
-        str input, 
+        str input,
 
         str *before,
         str *content,
@@ -418,9 +458,9 @@ b8 find_content(
     }
 
     *before = (str) { input.data, where };
-    input = (str) { 
-        input.data + where + prefix.len, 
-        input.len  - where - prefix.len 
+    input = (str) {
+        input.data + where + prefix.len,
+        input.len  - where - prefix.len
     };
 
     if(!str_index_of(input, suffix, &where)) {
@@ -428,9 +468,9 @@ b8 find_content(
     }
 
     *content = str_trim( (str) { input.data, where } );
-    *after = (str) { 
-        input.data + where + suffix.len, 
-        input.len  - where - suffix.len 
+    *after = (str) {
+        input.data + where + suffix.len,
+        input.len  - where - suffix.len
     };
 
     return True;
@@ -477,10 +517,21 @@ b8 find_endfor(str input, str *_content, str *_after) {
             }
         } else {
             if(str_eq(content, str_lit("endfor"))) {
-                todo();
+                depth -= 1;
             } else {
-                todo();    
+                str maybe_for = content_chop_alphanum(&content);
+
+                // TODO: validate it even more ?
+                b8 is_for = str_eq(maybe_for, str_lit("for"));
+                if(is_for) {
+                    depth += 1;
+                } else {
+                    // pass
+                }
+
             }
+
+            input = after;
         }
 
     }
@@ -488,9 +539,9 @@ b8 find_endfor(str input, str *_content, str *_after) {
 }
 
 void expand_value(
-    str_builder *sb, 
-    str content, 
-    Value *dict, 
+    str_builder *sb,
+    str content,
+    Value *dict,
     str key) {
 
     Value *value = value_object_get(dict, key);
@@ -506,7 +557,7 @@ void expand_value(
 
             content_chop_string(&content, str_lit("."));
             key = content_chop_alphanum(&content);
-    
+
             // TODO: keep track of your own call-stack?
             expand_value(sb, content, value, key);
 
@@ -520,8 +571,6 @@ void expand_value(
 
 str_builder *expand(str_builder *sb, str input, Value *dict) {
 
-    asm("int3");
-
     while(True) {
 
         str before, content, rest;
@@ -532,7 +581,9 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
             str key = content_chop_alphanum(&content);
 
             if(key.len == 0) todo();
-            if(str_eq(key, str_lit("for"))) {
+            if(str_eq(key, str_lit("if"))) {
+                todo();
+            } else if(str_eq(key, str_lit("for"))) {
 
                 str it = content_chop_alphanum(&content);
                 str in = content_chop_alphanum(&content);
@@ -603,7 +654,118 @@ s32 main(void) {
     {
         Value *given    = value_string(str_lit(
                     "{{ for obj in objects}}"
-                    "Hello, {{ prefix }}.{{ obj.name }}!\n"
+                    "{{ if obj.enabled }}"
+                    "Hello, {{ name }}.{{ obj.name }}!\n"
+                    "{{ endif }}"
+                    "{{ endfor }}"
+                    ));
+        Value *expected = value_string(str_lit(
+                    "Hello, PackageName.Foo!\n"
+                    "Hello, PackageName.Bazz!\n"
+                    ));
+
+        Value *obj1 = value_object();
+        value_object_push(
+            obj1,
+            str_lit("name"),
+            value_string(str_lit("Bazz")));
+        value_object_push(
+            obj1,
+            str_lit("enabled"),
+            value_boolean(1));
+
+        Value *obj2 = value_object();
+        value_object_push(
+            obj2,
+            str_lit("name"),
+            value_string(str_lit("Bar")));
+        value_object_push(
+            obj1,
+            str_lit("enabled"),
+            value_boolean(0));
+
+        Value *obj3 = value_object();
+        value_object_push(
+            obj3,
+            str_lit("name"),
+            value_string(str_lit("Foo")));
+        value_object_push(
+            obj1,
+            str_lit("enabled"),
+            value_boolean(1));
+
+
+        Value *context  = value_object_push(
+                value_object(),
+                str_lit("objects"),
+                value_array_push(value_array(), obj1, obj2, obj3)
+                );
+
+        value_object_push(
+                context,
+                str_lit("name"),
+                value_string(str_lit("PackageName"))
+                );
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ for xs in xss }}"
+                    "{{ for x in xs }}"
+                    "Hello, {{ x }}!\n"
+                    "{{ endfor }}"
+                    "{{ endfor }}"
+                    ));
+        Value *expected = value_string(str_lit(
+                    "Hello, One!\n"
+                    "Hello, Two!\n"
+                    "Hello, Three!\n"
+                    "Hello, Four!\n"
+                    "Hello, Five!\n"
+                    "Hello, Six!\n"
+                    "Hello, Seven!\n"
+                    "Hello, Eight!\n"
+                    "Hello, Nine!\n"
+                    ));
+
+        Value *context  = value_object_push(
+                value_object(),
+                str_lit("xss"),
+                value_array_push(
+                    value_array(),
+                        value_array_push(
+                            value_array(),
+                                value_string(str_lit("Seven")),
+                                value_string(str_lit("Eight")),
+                                value_string(str_lit("Nine"))),
+                        value_array_push(
+                            value_array(),
+                                value_string(str_lit("Four")),
+                                value_string(str_lit("Five")),
+                                value_string(str_lit("Six"))),
+                        value_array_push(
+                            value_array(),
+                                value_string(str_lit("One")),
+                                value_string(str_lit("Two")),
+                                value_string(str_lit("Three")))
+                    )
+                );
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ for obj in objects}}"
+                    "Hello, {{ name }}.{{ obj.name }}!\n"
                     "{{ endfor }}"
                     ));
         Value *expected = value_string(str_lit(
@@ -625,12 +787,12 @@ s32 main(void) {
 
         value_object_push(
                 context,
-                str_lit("prefix"),
+                str_lit("name"),
                 value_string(str_lit("PackageName"))
                 );
 
         value_array_push(
-                tests, 
+                tests,
                 value_array_push(value_array(), context, expected, given)
                 );
     }
@@ -666,7 +828,7 @@ s32 main(void) {
                 );
 
         value_array_push(
-                tests, 
+                tests,
                 value_array_push(value_array(), context, expected, given)
                 );
     }
@@ -696,7 +858,7 @@ s32 main(void) {
                 );
 
         value_array_push(
-                tests, 
+                tests,
                 value_array_push(value_array(), context, expected, given)
                 );
     }
@@ -725,7 +887,7 @@ s32 main(void) {
                 );
 
         value_array_push(
-                tests, 
+                tests,
                 value_array_push(value_array(), context, expected, given)
                 );
     }
@@ -740,7 +902,7 @@ s32 main(void) {
                 );
 
         value_array_push(
-                tests, 
+                tests,
                 value_array_push(value_array(), context, expected, given)
                 );
     }
@@ -751,7 +913,7 @@ s32 main(void) {
         Value *context  = value_object();
 
         value_array_push(
-                tests, 
+                tests,
                 value_array_push(value_array(), context, expected, given)
                 );
     }
@@ -772,11 +934,11 @@ s32 main(void) {
         if(context->kind != KIND_OBJECT) todo();
 
         str got = str_builder_to_str(*expand(
-                    &(str_builder) {0}, 
-                    given->as.string, 
+                    &(str_builder) {0},
+                    given->as.string,
                     context
                     ));
-        printf("Got: '"str_fmt"'\n", str_arg(got)); 
+        printf("Got: '"str_fmt"'\n", str_arg(got));
 
         if(!str_eq(got, expected->as.string)) {
             printf("    Given: '"str_fmt"'\n", str_arg(given->as.string));
