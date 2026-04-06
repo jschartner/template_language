@@ -19,7 +19,11 @@ typedef uint8_t b8;
 #define False 0
 #define True 1
 
-#define int3() __debugbreak()
+#ifdef _WIN32
+#  define int3() __debugbreak()
+#else
+#  define int3() asm("int3")
+#endif // _WIN32
 
 #define todo() do{ int3(); fprintf(stderr, "%s:%d:TODO\n", __FILE__, __LINE__); exit(1); }while(0)
 
@@ -427,6 +431,18 @@ Value *value_array_get(Value *array, u64 index) {
 
 }
 
+u64 value_array_len(Value *array) {
+    u64 len = 0;
+
+    Value *curr = array->as.array;
+    while(curr) {
+        len += 1;
+        curr = curr->next;
+    }
+
+    return len;
+}
+
 #define TOKENS()\
     X("==", double_equals)\
     X(".", dot)\
@@ -437,7 +453,9 @@ Value *value_array_get(Value *array, u64 index) {
     X("if", if)\
     X("endif", endif)\
     X("for", for)\
-    X("endfor", endfor)
+    X("endfor", endfor)\
+    X(",", comma)\
+    X("_", underscore)
 
 typedef enum {
     TOKEN_TYPE_EOF,
@@ -527,7 +545,7 @@ Token content_chop_token(str *content) {
         content->len  -= i;
         return result;
     } else if(c == '\"') {
-    
+
         b8 copied = False;
 
         u64 cap;
@@ -566,7 +584,7 @@ Token content_chop_token(str *content) {
                         }
                         escape = True;
                     }
-    
+
                 } break;
                 case '\"': {
                     if(escape) {
@@ -601,7 +619,7 @@ Token content_chop_token(str *content) {
 
             result.as.string = (str) {
                 mem,
-                len 
+                len
             };
         } else {
             result.as.string = (str) {
@@ -727,13 +745,20 @@ b8 find_suffix(
 
 Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_token) {
 
+    u32 iteration = 0;
+
+    b8 can_recover = False;
+    str recovery;
     while(True) {
 
         Token token;
         if(_token) {
             token = *_token;
             _token = NULL;
+            can_recover = False;
         } else {
+            recovery = *content;
+            can_recover = True;
             token = content_chop_token(content);
         }
 
@@ -770,7 +795,11 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
                             number = expr->as.string.len;
                             got_number = True;
                         } break;
-                        default: 
+                        case KIND_ARRAY: {
+                            number = value_array_len(expr);
+                            got_number = True;
+                        } break;
+                        default:
                             todo();
                     }
 
@@ -809,7 +838,7 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
                         index = (u64) expr->as.number;
                         got_index = True;
                     } break;
-                    default: 
+                    default:
                         todo();
                 }
 
@@ -820,8 +849,15 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
 
             } break;
 
-            default:
-                todo();
+            default: {
+                if(iteration == 0) {
+                    todo();
+                } else {
+                    if(!can_recover) todo();
+                    *content = recovery;
+                    return dict;
+                }
+            } break;
         }
 
         if(got_index) {
@@ -844,7 +880,7 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
             }
             got_value = True;
         }
-    
+
         if(got_value) {
             switch(value->kind) {
                 case KIND_BOOLEAN: {
@@ -880,6 +916,8 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
                 default:
                     todo();
             }
+
+            iteration += 1;
         }
 
         if(got_string) {
@@ -956,9 +994,9 @@ void value_expand(str_builder *sb, Value *value) {
                 number = -number;
                 negative = True;
             }
-    
+
             u32 cap = 32;
-            u8 *mem = alloc(cap); 
+            u8 *mem = alloc(cap);
             u32 pos = cap - 1;
 
             if(number == 0) {
@@ -1022,21 +1060,59 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
                     input = rest;
                 } break;
                 case TOKEN_TYPE_for: {
-                    str it = content_chop_alphanum(&content);
-                    str in = content_chop_alphanum(&content);
-                    str iterator = content_chop_alphanum(&content);
-                    content_expect_empty(content);
 
+                    u32 arity = 1;
+                    Token fst = content_chop_token(&content);
+                    Token snd;
+                    str in;
+
+                    token = content_chop_token(&content);
+                    if(token.type == TOKEN_TYPE_ALPHANUM) {
+                        in = token.as.string;
+                        // pass
+                    } else if(token.type == TOKEN_TYPE_comma) {
+                        arity = 2;
+                        snd = content_chop_token(&content);
+                        in = content_chop_alphanum(&content);
+                    } else {
+                        todo();
+                    }
                     if(!str_eq(in, str_lit("in"))) {
                         todo();
                     }
+                    str iterator = content_chop_alphanum(&content);
+                    content_expect_empty(content);
 
                     Value *array = value_object_get(dict, iterator);
                     if(!array) todo();
                     if(array->kind != KIND_ARRAY) todo();
 
-                    if(value_object_contains_key(dict, it)) {
+                    b8 set_value;
+                    b8 set_index;
+                    str value_name;
+                    str index_name;
+                    if(arity == 1) {
+                        value_name = fst.as.string;
+                        set_value = fst.type == TOKEN_TYPE_ALPHANUM;
+                        set_index = False;
+                    } else if(arity == 2) {
+                        value_name = snd.as.string;
+                        index_name = fst.as.string;
+                        set_value = snd.type == TOKEN_TYPE_ALPHANUM;
+                        set_index = fst.type == TOKEN_TYPE_ALPHANUM;
+                    } else {
                         todo();
+                    }
+
+                    if(set_value) {
+                        if(value_object_contains_key(dict, value_name)) {
+                            todo();
+                        }
+                    }
+                    if(set_index) {
+                        if(value_object_contains_key(dict, index_name)) {
+                            todo();
+                        }
                     }
 
                     str inner_input;
@@ -1051,22 +1127,37 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
 
                     Value *curr = array->as.array;
 
+                    u64 index = 0;
                     while(curr) {
 
                         // Copy the value, since appending it to dict,
                         // invalidates 'curr->next', that points to the
                         // next array_element.
-                        Value *copy = value_copy(curr);
 
-                        value_object_push(dict, it, copy);
+                        if(set_value) {
+                            Value *copy = value_copy(curr);
+                            value_object_push(dict, value_name, copy);
+                        }
+
+                        if(set_index) {
+                            value_object_push(dict, index_name, value_number(index));
+                        }
 
                         // TODO: keep track of your own call-stack?
                         expand(sb, inner_input, dict);
 
-                        value_free(value_pop(dict));
-                        value_free(value_pop(dict));
+                        if(set_index) {
+                            value_free(value_pop(dict));
+                            value_free(value_pop(dict));
+                        }
+
+                        if(set_value) {
+                            value_free(value_pop(dict));
+                            value_free(value_pop(dict));
+                        }
 
                         curr = curr->next;
+                        index += 1;
 
                     }
 
@@ -1095,6 +1186,67 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
 s32 main(void) {
 
     Value *tests = value_array();
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ for index, _ in names }}"
+                    "Hello, ({{ index }})!\n"
+                    "{{ endfor }}"
+                    ));
+        Value *expected = value_string(str_lit(
+                    "Hello, (0)!\n"
+                    "Hello, (1)!\n"
+                    "Hello, (2)!\n"
+                    ));
+
+        Value *context  = value_object_push(
+                value_object(),
+                str_lit("names"),
+                value_array_push(
+                    value_array(),
+                    value_string(str_lit("Bazz")),
+                    value_string(str_lit("Bar")),
+                    value_string(str_lit("Foo"))
+
+                    )
+                );
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ for index, name in names }}"
+                    "Hello, {{ name }} ({{ index }})!\n"
+                    "{{ endfor }}"
+                    ));
+        Value *expected = value_string(str_lit(
+                    "Hello, Foo (0)!\n"
+                    "Hello, Bar (1)!\n"
+                    "Hello, Bazz (2)!\n"
+                    ));
+
+        Value *context  = value_object_push(
+                value_object(),
+                str_lit("names"),
+                value_array_push(
+                    value_array(),
+                    value_string(str_lit("Bazz")),
+                    value_string(str_lit("Bar")),
+                    value_string(str_lit("Foo"))
+
+                    )
+                );
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
 
     {
         Value *given    = value_string(str_lit(
