@@ -19,7 +19,9 @@ typedef uint8_t b8;
 #define False 0
 #define True 1
 
-#define todo() do{ asm("int3"); fprintf(stderr, "%s:%d:TODO\n", __FILE__, __LINE__); exit(1); }while(0)
+#define int3() __debugbreak()
+
+#define todo() do{ int3(); fprintf(stderr, "%s:%d:TODO\n", __FILE__, __LINE__); exit(1); }while(0)
 
 u8 __mem[1024 * 1024] = {0};
 u64 __mem_pos = 0;
@@ -317,6 +319,9 @@ Value *value_copy(Value *value) {
         case KIND_BOOLEAN: {
             return value_boolean(value->as.boolean);
         } break;
+        case KIND_NUMBER: {
+            return value_number(value->as.number);
+        } break;
         case KIND_STRING: {
             return value_string(value->as.string);
         } break;
@@ -427,6 +432,8 @@ Value *value_array_get(Value *array, u64 index) {
     X(".", dot)\
     X("[", bracket_open)\
     X("]", bracket_close)\
+    X("(", paren_open)\
+    X(")", paren_close)\
     X("if", if)\
     X("endif", endif)\
     X("for", for)\
@@ -520,18 +527,67 @@ Token content_chop_token(str *content) {
         content->len  -= i;
         return result;
     } else if(c == '\"') {
+    
+        b8 copied = False;
+
+        u64 cap;
+        u8 *mem;
+        u64 len;
+
         u64 i = 1;
+
         b8 running = True;
+        b8 escape = False;
         while(running) {
             if(content->len <= i) break;
             c = content->data[i];
             // TODO: add escaping
 
             switch(c) {
-                case '\\':
-                    todo();
+                case '\\': {
+
+                    if(escape) {
+                        if(cap <= len) {
+                            alloc(cap);
+                            cap *= 2;
+                        }
+                        mem[len++] = '\\';
+                        escape = False;
+                    } else {
+                        if(!copied) {
+                            cap = (i - 1) * 2;
+                            mem = alloc(cap);
+                            len = 0;
+
+                            memcpy(mem, content->data + 1, i - 1);
+                            len += i - 1;
+
+                            copied = True;
+                        }
+                        escape = True;
+                    }
+    
+                } break;
                 case '\"': {
-                    running = False;
+                    if(escape) {
+                        if(cap <= len) {
+                            alloc(cap);
+                            cap *= 2;
+                        }
+                        mem[len++] = '\"';
+                        escape = False;
+                    } else {
+                        running = False;
+                    }
+                } break;
+                default: {
+                    if(copied) {
+                        if(cap <= len) {
+                            alloc(cap);
+                            cap *= 2;
+                        }
+                        mem[len++] = content->data[i];
+                    }
                 } break;
             }
 
@@ -539,17 +595,25 @@ Token content_chop_token(str *content) {
         }
         Token result = {
             .type = TOKEN_TYPE_STRING,
-            .as.string = (str) {
+        };
+        if(copied) {
+            __mem_pos -= cap - len;
+
+            result.as.string = (str) {
+                mem,
+                len 
+            };
+        } else {
+            result.as.string = (str) {
                 content->data + 1,
                 i - 2
-            }
-        };
+            };
+        }
         content->data += i;
         content->len  -= i;
         return result;
 
     } else {
-
 
         todo();
     }
@@ -600,7 +664,7 @@ b8 find_content(
     *before = (str) { input.data, where };
     input = (str) {
         input.data + where + prefix.len,
-        input.len  - where - prefix.len
+            input.len  - where - prefix.len
     };
 
     if(!str_index_of(input, suffix, &where)) {
@@ -610,18 +674,18 @@ b8 find_content(
     *content = str_trim( (str) { input.data, where } );
     *after = (str) {
         input.data + where + suffix.len,
-        input.len  - where - suffix.len
+            input.len  - where - suffix.len
     };
 
     return True;
 }
 
 b8 find_suffix(
-    str input,
-    str *_content,
-    str *_after,
-    Token_Type prefix,
-    Token_Type suffix) {
+        str input,
+        str *_content,
+        str *_after,
+        Token_Type prefix,
+        Token_Type suffix) {
 
     u64 depth = 1;
 
@@ -682,6 +746,12 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
         b8 got_key = False;
         str key;
 
+        b8 got_index = False;
+        u64 index;
+
+        b8 got_value = False;
+        Value *value;
+
         switch(token.type) {
             case TOKEN_TYPE_ALPHANUM: {
 
@@ -690,6 +760,25 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
                     return value_boolean(1);
                 } else if(str_eq(label, str_lit("false"))) {
                     return value_boolean(0);
+                } else if(str_eq(label, str_lit("len"))) {
+                    token = content_chop_token(content);
+                    if(token.type != TOKEN_TYPE_paren_open) todo();
+
+                    Value *expr = expand_get_value(content, global_dict, global_dict, NULL);
+                    switch(expr->kind) {
+                        case KIND_STRING: {
+                            number = expr->as.string.len;
+                            got_number = True;
+                        } break;
+                        default: 
+                            todo();
+                    }
+
+                    token = content_chop_token(content);
+                    if(token.type != TOKEN_TYPE_paren_close) todo();
+
+                    value_free(expr);
+
                 } else {
                     key = label;
                     got_key = True;
@@ -709,28 +798,54 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
 
             case TOKEN_TYPE_bracket_open: {
 
-                Value *value = expand_get_value(content, global_dict, global_dict, NULL);
-                if(value->kind != KIND_STRING) todo();
+                Value *expr = expand_get_value(content, global_dict, global_dict, NULL);
+                switch(expr->kind) {
+                    case KIND_STRING: {
+                        key = expr->as.string;
+                        got_key = True;
+                    } break;
+                    case KIND_NUMBER: {
+                        if(expr->as.number< 0) todo();
+                        index = (u64) expr->as.number;
+                        got_index = True;
+                    } break;
+                    default: 
+                        todo();
+                }
 
                 token = content_chop_token(content);
                 if(token.type != TOKEN_TYPE_bracket_close) todo();
 
-                key = value->as.string;
-                got_key = True;
+                value_free(expr);
 
-                value_free(value);
             } break;
 
             default:
                 todo();
         }
 
-        if(got_key) {
-            Value *value = value_object_get(dict, key);
+        if(got_index) {
+            if(value->kind != KIND_ARRAY) todo();
+
+            value = value_array_get(dict, index);
             if(!value) {
                 todo();
             }
+            got_value = True;
 
+        }
+
+        if(got_key) {
+            if(dict->kind != KIND_OBJECT) todo();
+
+            value = value_object_get(dict, key);
+            if(!value) {
+                todo();
+            }
+            got_value = True;
+        }
+    
+        if(got_value) {
             switch(value->kind) {
                 case KIND_BOOLEAN: {
                     return value_boolean(value->as.boolean);
@@ -759,6 +874,9 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
                     }
                     dict = value;
                 } break;
+                case KIND_ARRAY: {
+                    dict = value;
+                } break;
                 default:
                     todo();
             }
@@ -783,21 +901,20 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
                     }
 
                 } break;
-                case TOKEN_TYPE_bracket_close: {
-                    *content = content_copy;
-                    return value_string(lhs);
-                } break;
                 case TOKEN_TYPE_EOF: {
                     return value_string(lhs);
                 } break;
-                default:
-                    todo();
+                default: {
+                    *content = content_copy;
+                    return value_string(lhs);
+                } break;
             }
         }
 
         if(got_number) {
             s64 lhs = number;
 
+            str content_copy = *content;
             token = content_chop_token(content);
             switch(token.type) {
                 case TOKEN_TYPE_double_equals: {
@@ -815,8 +932,10 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
                 case TOKEN_TYPE_EOF: {
                     return value_number(lhs);
                 } break;
-                default:
-                    todo();
+                default: {
+                    *content = content_copy;
+                    return value_number(lhs);
+                } break;
             }
         }
     }
@@ -827,6 +946,41 @@ void value_expand(str_builder *sb, Value *value) {
     switch(value->kind) {
         case KIND_STRING: {
             str_builder_append(sb, value->as.string);
+        } break;
+        case KIND_NUMBER: {
+
+            s64 number = value->as.number;
+
+            b8 negative = False;
+            if(number < 0) {
+                number = -number;
+                negative = True;
+            }
+    
+            u32 cap = 32;
+            u8 *mem = alloc(cap); 
+            u32 pos = cap - 1;
+
+            if(number == 0) {
+                mem[pos--] = '0';
+            } else {
+                while(0 < number) {
+                    mem[pos--] = (number % 10) + '0';
+                    number /= 10;
+                }
+            }
+
+            if(negative) {
+                mem[pos--] = '-';
+            }
+            pos += 1;
+
+            // __mem_pos -= pos;
+
+            str_builder_append(sb, (str) {
+                mem + pos,
+                cap - pos
+            });
         } break;
         default:
             todo();
@@ -887,11 +1041,11 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
 
                     str inner_input;
                     if(!find_suffix(
-                            input,
-                            &inner_input,
-                            &rest,
-                            TOKEN_TYPE_for,
-                            TOKEN_TYPE_endfor)) {
+                                input,
+                                &inner_input,
+                                &rest,
+                                TOKEN_TYPE_for,
+                                TOKEN_TYPE_endfor)) {
                         todo();
                     }
 
@@ -944,9 +1098,92 @@ s32 main(void) {
 
     {
         Value *given    = value_string(str_lit(
-            "{{ \"\\\"Hello, World!\\\"\" }}"
-            ));
-        Value *expected = value_string(str_lit("\"Hello, World!\""));
+                    "{{ len(\"foo\") }}"
+                    ));
+        Value *expected = value_string(str_lit("3"));
+        Value *context  = value_object();
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ len(names) }}"
+                    ));
+        Value *expected = value_string(str_lit("3"));
+        Value *context  = value_object_push(
+                value_object(),
+                str_lit("names"),
+                value_array_push(
+                    value_array(),
+                    value_string(str_lit("Bazz")),
+                    value_string(str_lit("Bar")),
+                    value_string(str_lit("Foo"))
+
+                    )
+                );
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ for digit in digits }}"
+                    "{{ digit }}\n"
+                    "{{ endfor }}"
+                    ));
+        Value *expected = value_string(str_lit("0\n1\n2\n"));
+        Value *context  = value_object_push(
+                value_object(),
+                str_lit("digits"),
+                value_array_push(
+                    value_array(),
+                    value_number(2),
+                    value_number(1),
+                    value_number(0)
+                    )
+                );
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ names[2] }}"
+                    ));
+        Value *expected = value_string(str_lit("Bazz"));
+        Value *context  = value_object_push(
+                value_object(),
+                str_lit("names"),
+                value_array_push(
+                    value_array(),
+                    value_string(str_lit("Bazz")),
+                    value_string(str_lit("Bar")),
+                    value_string(str_lit("Foo"))
+
+                    )
+                );
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ \"\\\"Hello, \\\\ World!\\\"\" }}"
+                    ));
+        Value *expected = value_string(str_lit("\"Hello, \\ World!\""));
         Value *context  = value_object();
 
         value_array_push(
@@ -1023,8 +1260,8 @@ s32 main(void) {
 
     {
         Value *given    = value_string(str_lit(
-            "{{ \"{{\" }}"
-            ));
+                    "{{ \"{{\" }}"
+                    ));
         Value *expected = value_string(str_lit("{{"));
         Value *context  = value_object();
 
@@ -1036,14 +1273,14 @@ s32 main(void) {
 
     {
         Value *given    = value_string(str_lit(
-            "{{ if name == \"Bar\" }}Its bar\n{{ endif }}"
-            "{{ if \"Foo\" == name }}Its foo\n{{ endif }}"
-            ));
+                    "{{ if name == \"Bar\" }}Its bar\n{{ endif }}"
+                    "{{ if \"Foo\" == name }}Its foo\n{{ endif }}"
+                    ));
         Value *expected = value_string(str_lit("Its bar\n"));
         Value *context  = value_object_push(
-            value_object(),
-            str_lit("name"),
-            value_string(str_lit("Bar")));;
+                value_object(),
+                str_lit("name"),
+                value_string(str_lit("Bar")));;
 
         value_array_push(
                 tests,
@@ -1088,33 +1325,33 @@ s32 main(void) {
 
         Value *obj1 = value_object();
         value_object_push(
-            obj1,
-            str_lit("name"),
-            value_string(str_lit("Bazz")));
+                obj1,
+                str_lit("name"),
+                value_string(str_lit("Bazz")));
         value_object_push(
-            obj1,
-            str_lit("enabled"),
-            value_boolean(1));
+                obj1,
+                str_lit("enabled"),
+                value_boolean(1));
 
         Value *obj2 = value_object();
         value_object_push(
-            obj2,
-            str_lit("name"),
-            value_string(str_lit("Bar")));
+                obj2,
+                str_lit("name"),
+                value_string(str_lit("Bar")));
         value_object_push(
-            obj2,
-            str_lit("enabled"),
-            value_boolean(0));
+                obj2,
+                str_lit("enabled"),
+                value_boolean(0));
 
         Value *obj3 = value_object();
         value_object_push(
-            obj3,
-            str_lit("name"),
-            value_string(str_lit("Foo")));
+                obj3,
+                str_lit("name"),
+                value_string(str_lit("Foo")));
         value_object_push(
-            obj3,
-            str_lit("enabled"),
-            value_boolean(1));
+                obj3,
+                str_lit("enabled"),
+                value_boolean(1));
 
 
         Value *context  = value_object_push(
@@ -1160,23 +1397,23 @@ s32 main(void) {
                 str_lit("xss"),
                 value_array_push(
                     value_array(),
-                        value_array_push(
-                            value_array(),
-                                value_string(str_lit("Seven")),
-                                value_string(str_lit("Eight")),
-                                value_string(str_lit("Nine"))),
-                        value_array_push(
-                            value_array(),
-                                value_string(str_lit("Four")),
-                                value_string(str_lit("Five")),
-                                value_string(str_lit("Six"))),
-                        value_array_push(
-                            value_array(),
-                                value_string(str_lit("One")),
-                                value_string(str_lit("Two")),
-                                value_string(str_lit("Three")))
+                    value_array_push(
+                        value_array(),
+                        value_string(str_lit("Seven")),
+                        value_string(str_lit("Eight")),
+                        value_string(str_lit("Nine"))),
+                    value_array_push(
+                        value_array(),
+                        value_string(str_lit("Four")),
+                        value_string(str_lit("Five")),
+                        value_string(str_lit("Six"))),
+                    value_array_push(
+                        value_array(),
+                        value_string(str_lit("One")),
+                        value_string(str_lit("Two")),
+                        value_string(str_lit("Three")))
                     )
-                );
+                    );
 
         value_array_push(
                 tests,
