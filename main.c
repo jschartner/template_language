@@ -137,6 +137,7 @@ typedef struct Value Value;
 
 typedef enum {
     KIND_BOOLEAN,
+    KIND_NUMBER,
     KIND_STRING,
     KIND_ARRAY,
     KIND_OBJECT,
@@ -147,6 +148,7 @@ struct Value {
     Kind kind;
     union {
         b8 boolean;
+        s64 number;
         str string;
         Value *array;
         Value *object;
@@ -175,12 +177,10 @@ void value_free(Value *value) {
 
     switch(value->kind) {
 
-        case KIND_BOOLEAN: {
-        } break;
-
-        case KIND_STRING: {
-            // pass
-        } break;
+        case KIND_BOOLEAN:
+        case KIND_NUMBER:
+        case KIND_STRING:
+            break;
 
         case KIND_OBJECT:
         case KIND_ARRAY: {
@@ -209,6 +209,13 @@ Value *value_boolean(b8 boolean) {
     Value *v = value_alloc();
     v->kind = KIND_BOOLEAN;
     v->as.boolean = boolean;
+    return v;
+}
+
+Value *value_number(s64 number) {
+    Value *v = value_alloc();
+    v->kind = KIND_NUMBER;
+    v->as.number = number;
     return v;
 }
 
@@ -415,13 +422,146 @@ Value *value_array_get(Value *array, u64 index) {
 
 }
 
+#define TOKENS()\
+    X("==", double_equals)\
+    X(".", dot)\
+    X("[", bracket_open)\
+    X("]", bracket_close)\
+    X("if", if)\
+    X("endif", endif)\
+    X("for", for)\
+    X("endfor", endfor)
+
+typedef enum {
+    TOKEN_TYPE_EOF,
+    TOKEN_TYPE_ALPHANUM,
+    TOKEN_TYPE_NUMBER,
+    TOKEN_TYPE_STRING,
+#define X(s, n) TOKEN_TYPE_##n,
+    TOKENS()
+#undef X
+} Token_Type;
+
+typedef struct {
+    union {
+        s64 number;
+        str string;
+    } as;
+    Token_Type type;
+} Token;
+
+Token content_chop_token(str *content) {
+
+    *content = str_trim_left(*content);
+
+    if(content->len == 0) {
+        return (Token) {
+            .type = TOKEN_TYPE_EOF,
+        };
+    }
+
+#define X(s, n) do{\
+    str delim = str_lit( s );\
+    if(delim.len <= content->len && \
+         memcmp(content->data, delim.data, delim.len) == 0) {\
+        Token token = {\
+            .type = TOKEN_TYPE_##n,\
+        };\
+        content->data += delim.len;\
+        content->len  -= delim.len;\
+        return token;\
+    }\
+}while(0);
+        TOKENS()
+#undef X
+
+
+    u8 c = *content->data;
+    if(is_alpha(c)) {
+        u64 i = 0;
+        while(True) {
+            if(content->len <= i) break;
+            c = content->data[i];
+            if(is_alpha(c) || is_num(c) || c == '_') {
+
+            } else {
+                break;
+            }
+            i += 1;
+        }
+        Token result = {
+            .type = TOKEN_TYPE_ALPHANUM,
+            .as.string = (str) {
+                content->data,
+                i
+            }
+        };
+        content->data += i;
+        content->len  -= i;
+        return result;
+    } else if(is_num(c)) {
+        u64 i = 0;
+        s64 number = 0;
+        while(True) {
+            if(content->len <= i) break;
+            c = content->data[i];
+            if(is_num(c)) {
+                number += c - '0';
+            } else {
+                break;
+            }
+            i += 1;
+        }
+        Token result = {
+            .type = TOKEN_TYPE_NUMBER,
+            .as.number = number,
+        };
+        content->data += i;
+        content->len  -= i;
+        return result;
+    } else if(c == '\"') {
+        u64 i = 1;
+        b8 running = True;
+        while(running) {
+            if(content->len <= i) break;
+            c = content->data[i];
+            // TODO: add escaping
+
+            switch(c) {
+                case '\\':
+                    todo();
+                case '\"': {
+                    running = False;
+                } break;
+            }
+
+            i += 1;
+        }
+        Token result = {
+            .type = TOKEN_TYPE_STRING,
+            .as.string = (str) {
+                content->data + 1,
+                i - 2
+            }
+        };
+        content->data += i;
+        content->len  -= i;
+        return result;
+
+    } else {
+
+
+        todo();
+    }
+
+}
 
 str content_chop_alphanum(str *content) {
 
-    *content = str_trim_left(*content);
-    if(content->len == 0) todo();
-    if(!is_alpha(*content->data)) todo();
-    return str_chop_while_alphanum(content);
+    Token token = content_chop_token(content);
+    if(token.type != TOKEN_TYPE_ALPHANUM) todo();
+    return token.as.string;
+
 }
 
 void content_chop_string(str *content, str string) {
@@ -476,9 +616,12 @@ b8 find_content(
     return True;
 }
 
-
-
-b8 find_endfor(str input, str *_content, str *_after) {
+b8 find_suffix(
+    str input,
+    str *_content,
+    str *_after,
+    Token_Type prefix,
+    Token_Type suffix) {
 
     u64 depth = 1;
 
@@ -491,9 +634,10 @@ b8 find_endfor(str input, str *_content, str *_after) {
             return False;
         }
 
-        if(depth == 1) {
-            if(str_eq(content, str_lit("endfor"))) {
+        Token token = content_chop_token(&content);
 
+        if(token.type == suffix) {
+            if(depth == 1) {
                 u8 *end = before.data + before.len;
 
                 *_content = (str) { start, end - start };
@@ -501,72 +645,192 @@ b8 find_endfor(str input, str *_content, str *_after) {
 
                 return True;
             } else {
-
-                str maybe_for = content_chop_alphanum(&content);
-
-                // TODO: validate it even more ?
-                b8 is_for = str_eq(maybe_for, str_lit("for"));
-                if(is_for) {
-                    depth += 1;
-                } else {
-                    // pass
-                }
-
-                input = after;
-
+                depth -= 1;
             }
         } else {
-            if(str_eq(content, str_lit("endfor"))) {
-                depth -= 1;
+            if(token.type == prefix) {
+                depth += 1;
             } else {
-                str maybe_for = content_chop_alphanum(&content);
-
-                // TODO: validate it even more ?
-                b8 is_for = str_eq(maybe_for, str_lit("for"));
-                if(is_for) {
-                    depth += 1;
-                } else {
-                    // pass
-                }
-
+                // pass
             }
-
-            input = after;
         }
+
+        input = after;
 
     }
 
 }
 
-void expand_value(
-    str_builder *sb,
-    str content,
-    Value *dict,
-    str key) {
+Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_token) {
 
-    Value *value = value_object_get(dict, key);
-    if(!value) todo();
+    while(True) {
 
+        Token token;
+        if(_token) {
+            token = *_token;
+            _token = NULL;
+        } else {
+            token = content_chop_token(content);
+        }
+
+        b8 got_string = False;
+        str string;
+
+        b8 got_number = False;
+        s64 number;
+
+        b8 got_key = False;
+        str key;
+
+        switch(token.type) {
+            case TOKEN_TYPE_ALPHANUM: {
+
+                str label = token.as.string;
+                if(str_eq(label, str_lit("true"))) {
+                    return value_boolean(1);
+                } else if(str_eq(label, str_lit("false"))) {
+                    return value_boolean(0);
+                } else {
+                    key = label;
+                    got_key = True;
+                }
+
+            } break;
+
+            case TOKEN_TYPE_NUMBER: {
+                number = token.as.number;
+                got_number = True;
+            } break;
+
+            case TOKEN_TYPE_STRING: {
+                string = token.as.string;
+                got_string = True;
+            } break;
+
+            case TOKEN_TYPE_bracket_open: {
+
+                Value *value = expand_get_value(content, global_dict, global_dict, NULL);
+                if(value->kind != KIND_STRING) todo();
+
+                token = content_chop_token(content);
+                if(token.type != TOKEN_TYPE_bracket_close) todo();
+
+                key = value->as.string;
+                got_key = True;
+
+                value_free(value);
+            } break;
+
+            default:
+                todo();
+        }
+
+        if(got_key) {
+            Value *value = value_object_get(dict, key);
+            if(!value) {
+                todo();
+            }
+
+            switch(value->kind) {
+                case KIND_BOOLEAN: {
+                    return value_boolean(value->as.boolean);
+                } break;
+                case KIND_NUMBER: {
+                    number = value->as.number;
+                    got_number = True;
+                } break;
+                case KIND_STRING: {
+                    string = value->as.string;
+                    got_string = True;
+                } break;
+                case KIND_OBJECT: {
+                    token = content_chop_token(content);
+                    switch(token.type) {
+                        case TOKEN_TYPE_dot:
+                            break;
+                        case TOKEN_TYPE_bracket_open:
+                            // foo["bar"]
+
+                            // Reuse 'token' but update 'dict'
+                            _token = &token;
+                            break;
+                        default:
+                            todo();
+                    }
+                    dict = value;
+                } break;
+                default:
+                    todo();
+            }
+        }
+
+        if(got_string) {
+            str lhs = string;
+
+            str content_copy = *content;
+            token = content_chop_token(content);
+            switch(token.type) {
+                case TOKEN_TYPE_double_equals: {
+
+                    Value *rhs = expand_get_value(content, global_dict, global_dict, NULL);
+                    switch(rhs->kind) {
+                        case KIND_STRING: {
+                            value_free(rhs);
+                            return value_boolean(str_eq(lhs, rhs->as.string));
+                        } break;
+                        default:
+                            todo();
+                    }
+
+                } break;
+                case TOKEN_TYPE_bracket_close: {
+                    *content = content_copy;
+                    return value_string(lhs);
+                } break;
+                case TOKEN_TYPE_EOF: {
+                    return value_string(lhs);
+                } break;
+                default:
+                    todo();
+            }
+        }
+
+        if(got_number) {
+            s64 lhs = number;
+
+            token = content_chop_token(content);
+            switch(token.type) {
+                case TOKEN_TYPE_double_equals: {
+                    Value *rhs = expand_get_value(content, global_dict, global_dict, NULL);
+
+                    switch(rhs->kind) {
+                        case KIND_NUMBER: {
+                            value_free(rhs);
+                            return value_boolean(lhs == rhs->as.number);
+                        } break;
+                        default:
+                            todo();
+                    }
+                } break;
+                case TOKEN_TYPE_EOF: {
+                    return value_number(lhs);
+                } break;
+                default:
+                    todo();
+            }
+        }
+    }
+
+}
+
+void value_expand(str_builder *sb, Value *value) {
     switch(value->kind) {
         case KIND_STRING: {
             str_builder_append(sb, value->as.string);
-            content_expect_empty(content);
         } break;
-
-        case KIND_OBJECT: {
-
-            content_chop_string(&content, str_lit("."));
-            key = content_chop_alphanum(&content);
-
-            // TODO: keep track of your own call-stack?
-            expand_value(sb, content, value, key);
-
-        } break;
-
         default:
             todo();
     }
-
 }
 
 str_builder *expand(str_builder *sb, str input, Value *dict) {
@@ -578,64 +842,91 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
             str_builder_append(sb, before);
             input = rest;
 
-            str key = content_chop_alphanum(&content);
+            Token token = content_chop_token(&content);
 
-            if(key.len == 0) todo();
-            if(str_eq(key, str_lit("if"))) {
-                todo();
-            } else if(str_eq(key, str_lit("for"))) {
+            switch(token.type) {
+                case TOKEN_TYPE_if: {
+                    Value *value = expand_get_value(&content, dict, dict, NULL);
+                    content_expect_empty(content);
 
-                str it = content_chop_alphanum(&content);
-                str in = content_chop_alphanum(&content);
-                str iterator = content_chop_alphanum(&content);
-                content_expect_empty(content);
+                    b8 good;
+                    if(value->kind == KIND_BOOLEAN) {
+                        good = value->as.boolean;
+                    } else {
+                        todo();
+                    }
 
-                if(!str_eq(in, str_lit("in"))) {
-                    todo();
-                }
+                    str inner_input;
+                    if(!find_suffix(input, &inner_input, &rest, TOKEN_TYPE_if, TOKEN_TYPE_endif)) {
+                        todo();
+                    }
 
-                Value *array = value_object_get(dict, iterator);
-                if(!array) todo();
-                if(array->kind != KIND_ARRAY) todo();
+                    if(good) {
+                        expand(sb, inner_input, dict);
+                    }
 
-                if(value_object_contains_key(dict, it)) {
-                    todo();
-                }
+                    input = rest;
+                } break;
+                case TOKEN_TYPE_for: {
+                    str it = content_chop_alphanum(&content);
+                    str in = content_chop_alphanum(&content);
+                    str iterator = content_chop_alphanum(&content);
+                    content_expect_empty(content);
 
-                str inner_input;
-                if(!find_endfor(input, &inner_input, &rest)) {
-                    todo();
-                }
+                    if(!str_eq(in, str_lit("in"))) {
+                        todo();
+                    }
 
-                Value *curr = array->as.array;
+                    Value *array = value_object_get(dict, iterator);
+                    if(!array) todo();
+                    if(array->kind != KIND_ARRAY) todo();
 
-                while(curr) {
+                    if(value_object_contains_key(dict, it)) {
+                        todo();
+                    }
 
-                    // Copy the value, since appending it to dict,
-                    // invalidates 'curr->next', that points to the
-                    // next array_element.
-                    Value *copy = value_copy(curr);
+                    str inner_input;
+                    if(!find_suffix(
+                            input,
+                            &inner_input,
+                            &rest,
+                            TOKEN_TYPE_for,
+                            TOKEN_TYPE_endfor)) {
+                        todo();
+                    }
 
-                    value_object_push(dict, it, copy);
+                    Value *curr = array->as.array;
 
-                    // TODO: keep track of your own call-stack?
-                    expand(sb, inner_input, dict);
+                    while(curr) {
 
-                    value_free(value_pop(dict));
-                    value_free(value_pop(dict));
+                        // Copy the value, since appending it to dict,
+                        // invalidates 'curr->next', that points to the
+                        // next array_element.
+                        Value *copy = value_copy(curr);
 
-                    curr = curr->next;
+                        value_object_push(dict, it, copy);
 
-                }
+                        // TODO: keep track of your own call-stack?
+                        expand(sb, inner_input, dict);
 
-                input = rest;
+                        value_free(value_pop(dict));
+                        value_free(value_pop(dict));
 
-            } else {
+                        curr = curr->next;
 
-                // TODO: keep track of your own call-stack?
-                expand_value(sb, content, dict, key);
+                    }
 
+                    input = rest;
+                } break;
+
+                default: {
+                    Value *value = expand_get_value(&content, dict, dict, &token);
+                    value_expand(sb, value);
+                    value_free(value);
+                } break;
             }
+
+            content_expect_empty(content);
 
         } else {
             str_builder_append(sb, input);
@@ -650,6 +941,137 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
 s32 main(void) {
 
     Value *tests = value_array();
+
+    {
+        Value *given    = value_string(str_lit(
+            "{{ \"\\\"Hello, World!\\\"\" }}"
+            ));
+        Value *expected = value_string(str_lit("\"Hello, World!\""));
+        Value *context  = value_object();
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit("Hello, {{ data.inner[inner_data_name] }}!"));
+        Value *expected = value_string(str_lit("Hello, Foo!"));
+        Value *context  = value_object_push(
+                value_object(),
+                str_lit("inner_data_name"),
+                value_string(str_lit("name"))
+                );
+
+        value_object_push(
+                context,
+                str_lit("data"),
+
+                value_object_push(
+                    value_object(),
+                    str_lit("inner"),
+                    value_object_push(
+                        value_object(),
+                        str_lit("name"),
+                        value_string(str_lit("Foo")))
+
+                    )
+
+                );
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ for obj in objects}}"
+                    "Hello, {{ [\"name with spaces\"] }}.{{ obj[\"name\"] }}!\n"
+                    "{{ endfor }}"
+                    ));
+        Value *expected = value_string(str_lit(
+                    "Hello, PackageName.Foo!\n"
+                    "Hello, PackageName.Bar!\n"
+                    "Hello, PackageName.Bazz!\n"
+                    ));
+
+        Value *context  = value_object_push(
+                value_object(),
+                str_lit("objects"),
+                value_array_push(
+                    value_array(),
+                    value_object_push(value_object(), str_lit("name"), value_string(str_lit("Bazz"))),
+                    value_object_push(value_object(), str_lit("name"), value_string(str_lit("Bar"))),
+                    value_object_push(value_object(), str_lit("name"), value_string(str_lit("Foo")))
+                    )
+                );
+
+        value_object_push(
+                context,
+                str_lit("name with spaces"),
+                value_string(str_lit("PackageName"))
+                );
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+            "{{ \"{{\" }}"
+            ));
+        Value *expected = value_string(str_lit("{{"));
+        Value *context  = value_object();
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+            "{{ if name == \"Bar\" }}Its bar\n{{ endif }}"
+            "{{ if \"Foo\" == name }}Its foo\n{{ endif }}"
+            ));
+        Value *expected = value_string(str_lit("Its bar\n"));
+        Value *context  = value_object_push(
+            value_object(),
+            str_lit("name"),
+            value_string(str_lit("Bar")));;
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit("{{ if 1 == 1 }}Hello, World!{{ endif }}"));
+        Value *expected = value_string(str_lit("Hello, World!"));
+        Value *context  = value_object();
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit("{{ if true }}Hello, World!{{ endif }}"));
+        Value *expected = value_string(str_lit("Hello, World!"));
+        Value *context  = value_object();
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
 
     {
         Value *given    = value_string(str_lit(
@@ -680,7 +1102,7 @@ s32 main(void) {
             str_lit("name"),
             value_string(str_lit("Bar")));
         value_object_push(
-            obj1,
+            obj2,
             str_lit("enabled"),
             value_boolean(0));
 
@@ -690,7 +1112,7 @@ s32 main(void) {
             str_lit("name"),
             value_string(str_lit("Foo")));
         value_object_push(
-            obj1,
+            obj3,
             str_lit("enabled"),
             value_boolean(1));
 
