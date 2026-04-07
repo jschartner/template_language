@@ -19,11 +19,14 @@ typedef uint8_t b8;
 #define False 0
 #define True 1
 
-#ifdef _WIN32
+#ifdef _MSCVER
 #  define int3() __debugbreak()
 #else
 #  define int3() asm("int3")
-#endif // _WIN32
+#endif // _MSCVER
+
+#undef int3
+#define int3()
 
 #define todo() do{ int3(); fprintf(stderr, "%s:%d:TODO\n", __FILE__, __LINE__); exit(1); }while(0)
 
@@ -808,6 +811,25 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
 
                     value_free(expr);
 
+                } else if(str_eq(label, str_lit("type"))) {
+                    token = content_chop_token(content);
+                    if(token.type != TOKEN_TYPE_paren_open) todo();
+
+                    Value *expr = expand_get_value(content, global_dict, global_dict, NULL);
+                    switch(expr->kind) {
+                        case KIND_STRING: {
+                            string = str_lit("string");
+                            got_string = True;
+                        } break;
+                        default:
+                            todo();
+                    }
+
+                    token = content_chop_token(content);
+                    if(token.type != TOKEN_TYPE_paren_close) todo();
+
+                    value_free(expr);
+
                 } else {
                     key = label;
                     got_key = True;
@@ -904,6 +926,8 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
 
                             // Reuse 'token' but update 'dict'
                             _token = &token;
+                            break;
+                        case TOKEN_TYPE_EOF:
                             break;
                         default:
                             todo();
@@ -1064,6 +1088,7 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
                     u32 arity = 1;
                     Token fst = content_chop_token(&content);
                     Token snd;
+                    Token trd;
                     str in;
 
                     token = content_chop_token(&content);
@@ -1073,92 +1098,208 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
                     } else if(token.type == TOKEN_TYPE_comma) {
                         arity = 2;
                         snd = content_chop_token(&content);
-                        in = content_chop_alphanum(&content);
+
+                        token = content_chop_token(&content);
+                        if(token.type == TOKEN_TYPE_comma) {
+                            arity = 3;
+                            trd = content_chop_token(&content);
+                            in  = content_chop_alphanum(&content);
+                        } else {
+                            in = token.as.string;
+                        }
                     } else {
                         todo();
                     }
                     if(!str_eq(in, str_lit("in"))) {
                         todo();
                     }
-                    str iterator = content_chop_alphanum(&content);
+
+                    Value *iterable = expand_get_value(&content, dict, dict, NULL);
+                    if(!iterable) todo();
+
                     content_expect_empty(content);
+            
+                    switch(iterable->kind) {
+                        case KIND_ARRAY: {
 
-                    Value *array = value_object_get(dict, iterator);
-                    if(!array) todo();
-                    if(array->kind != KIND_ARRAY) todo();
+                            b8 set_value;
+                            b8 set_index;
+                            str value_name;
+                            str index_name;
+                            if(arity == 1) {
+                                value_name = fst.as.string;
+                                set_value = fst.type == TOKEN_TYPE_ALPHANUM;
+                                set_index = False;
+                            } else if(arity == 2) {
+                                value_name = snd.as.string;
+                                index_name = fst.as.string;
+                                set_value = snd.type == TOKEN_TYPE_ALPHANUM;
+                                set_index = fst.type == TOKEN_TYPE_ALPHANUM;
+                            } else {
+                                todo();
+                            }
 
-                    b8 set_value;
-                    b8 set_index;
-                    str value_name;
-                    str index_name;
-                    if(arity == 1) {
-                        value_name = fst.as.string;
-                        set_value = fst.type == TOKEN_TYPE_ALPHANUM;
-                        set_index = False;
-                    } else if(arity == 2) {
-                        value_name = snd.as.string;
-                        index_name = fst.as.string;
-                        set_value = snd.type == TOKEN_TYPE_ALPHANUM;
-                        set_index = fst.type == TOKEN_TYPE_ALPHANUM;
-                    } else {
-                        todo();
-                    }
+                            if(set_value) {
+                                if(value_object_contains_key(dict, value_name)) {
+                                    todo();
+                                }
+                            }
+                            if(set_index) {
+                                if(value_object_contains_key(dict, index_name)) {
+                                    todo();
+                                }
+                            }
 
-                    if(set_value) {
-                        if(value_object_contains_key(dict, value_name)) {
+                            str inner_input;
+                            if(!find_suffix(
+                                        input,
+                                        &inner_input,
+                                        &rest,
+                                        TOKEN_TYPE_for,
+                                        TOKEN_TYPE_endfor)) {
+                                todo();
+                            }
+
+                            Value *curr = iterable->as.array;
+
+                            u64 index = 0;
+                            while(curr) {
+
+                                // Copy the value, since appending it to dict,
+                                // invalidates 'curr->next', that points to the
+                                // next array_element.
+
+                                if(set_value) {
+                                    Value *copy = value_copy(curr);
+                                    value_object_push(dict, value_name, copy);
+                                }
+
+                                if(set_index) {
+                                    value_object_push(dict, index_name, value_number(index));
+                                }
+
+                                // TODO: keep track of your own call-stack?
+                                expand(sb, inner_input, dict);
+
+                                if(set_index) {
+                                    value_free(value_pop(dict));
+                                    value_free(value_pop(dict));
+                                }
+
+                                if(set_value) {
+                                    value_free(value_pop(dict));
+                                    value_free(value_pop(dict));
+                                }
+
+                                curr = curr->next;
+                                index += 1;
+
+                            }
+
+                        } break;
+    
+                        case KIND_OBJECT: {
+
+                            b8 set_key;
+                            str key_name;
+
+                            b8 set_value;
+                            str value_name;
+
+                            b8 set_index;
+                            str index_name;
+
+                            if(arity == 1) {
+                                todo();
+                            } else if(arity == 2) {
+                                key_name   = fst.as.string;
+                                value_name = snd.as.string;
+                                set_key    = fst.type == TOKEN_TYPE_ALPHANUM;
+                                set_value  = snd.type == TOKEN_TYPE_ALPHANUM;
+                            } else if(arity == 3) {
+                                key_name   = snd.as.string;
+                                value_name = trd.as.string;
+                                index_name = fst.as.string;
+                                set_key    = snd.type == TOKEN_TYPE_ALPHANUM;
+                                set_value  = trd.type == TOKEN_TYPE_ALPHANUM;
+                                set_index  = fst.type == TOKEN_TYPE_ALPHANUM;
+                            } else {
+                                todo();
+                            }
+
+                            if(set_key) {
+                                if(value_object_contains_key(dict, key_name)) {
+                                    todo();
+                                }
+                            } 
+                            if(set_value) {
+                                if(value_object_contains_key(dict, value_name)) {
+                                    todo();
+                                }
+                            }
+                            if(set_index) {
+                                if(value_object_contains_key(dict, index_name)) {
+                                    todo();
+                                }
+                            }
+
+                            str inner_input;
+                            if(!find_suffix(
+                                        input,
+                                        &inner_input,
+                                        &rest,
+                                        TOKEN_TYPE_for,
+                                        TOKEN_TYPE_endfor)) {
+                                todo();
+                            }
+
+                            Value *curr = iterable->as.array;
+
+                            u64 index = 0;
+                            while(curr) {
+    
+                                Value *key_value = curr;
+                                curr = curr->next;
+                                Value *value_value = curr;
+
+                                if(set_key) {
+                                    value_object_push(dict, key_name, value_copy(key_value));
+                                }
+
+                                if(set_value) {
+                                    value_object_push(dict, value_name, value_copy(value_value));
+                                }
+
+                                if(set_index) {
+                                    value_object_push(dict, index_name, value_number(index));
+                                }
+
+                                // TODO: keep track of your own call-stack?
+                                expand(sb, inner_input, dict);
+
+                                if(set_index) {
+                                    value_free(value_pop(dict));
+                                    value_free(value_pop(dict));
+                                }
+
+                                if(set_value) {
+                                    value_free(value_pop(dict));
+                                    value_free(value_pop(dict));
+                                }
+
+                                if(set_key) {
+                                    value_free(value_pop(dict));
+                                    value_free(value_pop(dict));
+                                }
+
+                                curr = curr->next;
+                                index += 1;
+                            }
+
+                        } break;
+
+                        default:
                             todo();
-                        }
-                    }
-                    if(set_index) {
-                        if(value_object_contains_key(dict, index_name)) {
-                            todo();
-                        }
-                    }
-
-                    str inner_input;
-                    if(!find_suffix(
-                                input,
-                                &inner_input,
-                                &rest,
-                                TOKEN_TYPE_for,
-                                TOKEN_TYPE_endfor)) {
-                        todo();
-                    }
-
-                    Value *curr = array->as.array;
-
-                    u64 index = 0;
-                    while(curr) {
-
-                        // Copy the value, since appending it to dict,
-                        // invalidates 'curr->next', that points to the
-                        // next array_element.
-
-                        if(set_value) {
-                            Value *copy = value_copy(curr);
-                            value_object_push(dict, value_name, copy);
-                        }
-
-                        if(set_index) {
-                            value_object_push(dict, index_name, value_number(index));
-                        }
-
-                        // TODO: keep track of your own call-stack?
-                        expand(sb, inner_input, dict);
-
-                        if(set_index) {
-                            value_free(value_pop(dict));
-                            value_free(value_pop(dict));
-                        }
-
-                        if(set_value) {
-                            value_free(value_pop(dict));
-                            value_free(value_pop(dict));
-                        }
-
-                        curr = curr->next;
-                        index += 1;
-
                     }
 
                     input = rest;
@@ -1183,20 +1324,168 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
     return sb;
 }
 
+// TODO: allow constructing arrays or objects on the fly ?
+// TODO: dissalow 'for ), elem in elems'
+// TODO: allow constructing ranges 'for number in 0..10' ?
+// TODO: come up with a syntax, that allows to strip the whitespace before or 
+// after the 'instruction-tag'/'content' => '{{ for elem in elems -}}' ?
+// TODO: make arrays store the values in correct order - not reverse order ?
+// TODO: make objects constant access ?
+
 s32 main(void) {
 
     Value *tests = value_array();
 
     {
         Value *given    = value_string(str_lit(
-                    "{{ for index, _ in names }}"
-                    "Hello, ({{ index }})!\n"
+                    "{{ for index, key, value in [\"data\"] }}"
+                    "Hello, {{ key }} = {{ value }} ({{ index }})!\n"
                     "{{ endfor }}"
                     ));
         Value *expected = value_string(str_lit(
-                    "Hello, (0)!\n"
-                    "Hello, (1)!\n"
-                    "Hello, (2)!\n"
+            "Hello, bar = bazz (0)!\n"
+            "Hello, foo = bar (1)!\n"
+        ));
+    
+        Value *data = value_object(); 
+    
+        Value *context = value_object_push(
+            value_object(),
+            str_lit("data"),
+            data
+            );
+
+        value_object_push(
+            data,
+            str_lit("foo"),
+            value_string(str_lit("bar")));
+
+        value_object_push(
+            data,
+            str_lit("bar"),
+            value_string(str_lit("bazz")));
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ for _, value in data }}"
+                    "Hello, {{ value }}!\n"
+                    "{{ endfor }}"
+                    ));
+        Value *expected = value_string(str_lit(
+            "Hello, bazz!\n"
+            "Hello, bar!\n"
+        ));
+    
+        Value *data = value_object(); 
+    
+        Value *context = value_object_push(
+            value_object(),
+            str_lit("data"),
+            data
+            );
+
+        value_object_push(
+            data,
+            str_lit("foo"),
+            value_string(str_lit("bar")));
+
+        value_object_push(
+            data,
+            str_lit("bar"),
+            value_string(str_lit("bazz")));
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ for key, _ in data }}"
+                    "Hello, {{ key }}!\n"
+                    "{{ endfor }}"
+                    ));
+        Value *expected = value_string(str_lit(
+            "Hello, bar!\n"
+            "Hello, foo!\n"
+        ));
+    
+        Value *data = value_object(); 
+    
+        Value *context = value_object_push(
+            value_object(),
+            str_lit("data"),
+            data
+            );
+
+        value_object_push(
+            data,
+            str_lit("foo"),
+            value_string(str_lit("bar")));
+
+        value_object_push(
+            data,
+            str_lit("bar"),
+            value_string(str_lit("bazz")));
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ for key, value in data }}"
+                    "Hello, {{ key }} = {{ value }}!\n"
+                    "{{ endfor }}"
+                    ));
+        Value *expected = value_string(str_lit(
+            "Hello, bar = bazz!\n"
+            "Hello, foo = bar!\n"
+        ));
+    
+        Value *data = value_object(); 
+    
+        Value *context = value_object_push(
+            value_object(),
+            str_lit("data"),
+            data
+            );
+
+        value_object_push(
+            data,
+            str_lit("foo"),
+            value_string(str_lit("bar")));
+
+        value_object_push(
+            data,
+            str_lit("bar"),
+            value_string(str_lit("bazz")));
+
+        value_array_push(
+                tests,
+                value_array_push(value_array(), context, expected, given)
+                );
+    }
+
+    {
+        Value *given    = value_string(str_lit(
+                    "{{ for _, name in names }}"
+                    "Hello, {{ name }}!\n"
+                    "{{ endfor }}"
+                    ));
+        Value *expected = value_string(str_lit(
+                    "Hello, Foo!\n"
+                    "Hello, Bar!\n"
+                    "Hello, Bazz!\n"
                     ));
 
         Value *context  = value_object_push(
@@ -1216,7 +1505,6 @@ s32 main(void) {
                 value_array_push(value_array(), context, expected, given)
                 );
     }
-
 
     {
         Value *given    = value_string(str_lit(
