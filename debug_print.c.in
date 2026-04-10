@@ -1,0 +1,19 @@
+
+{{ for struct in structs -}}
+void print_{{ struct.name }}({{ struct.name }} *p) {
+    printf("{");
+    
+    {{- for index, field in struct.fields -}} 
+
+        {{- if 0 < index -}}
+            {{ "\n   "}} printf(",");
+        {{- endif -}}
+    
+        {{ "\n   " }} printf("{{ field.name }}");
+
+    {{- endfor -}}
+
+    {{ "\n   " }} printf("}\n"); 
+}
+{{- endfor }}
+

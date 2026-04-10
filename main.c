@@ -4,6 +4,9 @@
 #include <string.h>
 #include <stdarg.h>
 
+#define NOB_IMPLEMENTATION
+#include "nob.h"
+
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -50,6 +53,7 @@ b8 is_space(u8 c) {
     return
         c == ' ' ||
         c == '\n' ||
+        c == '\r' ||
         c == '\t';
 }
 
@@ -385,6 +389,8 @@ typedef struct {
 
 void str_builder_append(str_builder *sb, str s) {
 
+    if(s.len == 0) return;
+
     str_node *node = alloc(sizeof(*node));
     node->string = s;
     node->next = NULL;
@@ -458,6 +464,8 @@ u64 value_array_len(Value *array) {
     X("for", for)\
     X("endfor", endfor)\
     X(",", comma)\
+    X("-", minus)\
+    X("<", less)\
     X("_", underscore)
 
 typedef enum {
@@ -589,6 +597,25 @@ Token content_chop_token(str *content) {
                     }
 
                 } break;
+                case 'n': {
+                    if(escape) {
+                        if(!copied) todo();
+                        if(cap <= len) {
+                            alloc(cap);
+                            cap *= 2;
+                        }
+                        mem[len++] = '\n';
+                        escape = False;
+                    } else {
+                        if(copied) {
+                            if(cap <= len) {
+                                alloc(cap);
+                                cap *= 2;
+                            }
+                            mem[len++] = content->data[i];
+                        }
+                    }
+                } break;
                 case '\"': {
                     if(escape) {
                         if(cap <= len) {
@@ -602,6 +629,8 @@ Token content_chop_token(str *content) {
                     }
                 } break;
                 default: {
+                    if(escape) todo();
+
                     if(copied) {
                         if(cap <= len) {
                             alloc(cap);
@@ -685,7 +714,7 @@ b8 find_content(
     *before = (str) { input.data, where };
     input = (str) {
         input.data + where + prefix.len,
-            input.len  - where - prefix.len
+        input.len  - where - prefix.len
     };
 
     if(!str_index_of(input, suffix, &where)) {
@@ -695,7 +724,7 @@ b8 find_content(
     *content = str_trim( (str) { input.data, where } );
     *after = (str) {
         input.data + where + suffix.len,
-            input.len  - where - suffix.len
+        input.len  - where - suffix.len
     };
 
     return True;
@@ -705,6 +734,8 @@ b8 find_suffix(
         str input,
         str *_content,
         str *_after,
+        b8 *trim_before_suffix,
+        b8 *trim_after_suffix,
         Token_Type prefix,
         Token_Type suffix) {
 
@@ -720,13 +751,26 @@ b8 find_suffix(
         }
 
         Token token = content_chop_token(&content);
+        b8 got_minus = False;
+        if(token.type == TOKEN_TYPE_minus) {
+            token = content_chop_token(&content);
+            got_minus = True;
+        }
 
         if(token.type == suffix) {
             if(depth == 1) {
+                b8 got_second_minus = False;
+                token = content_chop_token(&content);
+                if(token.type == TOKEN_TYPE_minus) {
+                    got_second_minus = True;
+                }
+
                 u8 *end = before.data + before.len;
 
-                *_content = (str) { start, end - start };
-                *_after   = after;
+                *_content           = (str) { start, end - start };
+                *_after             = after;
+                *trim_before_suffix = got_minus;
+                *trim_after_suffix  = got_second_minus;
 
                 return True;
             } else {
@@ -883,7 +927,7 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
         }
 
         if(got_index) {
-            if(value->kind != KIND_ARRAY) todo();
+            if(dict->kind != KIND_ARRAY) todo();
 
             value = value_array_get(dict, index);
             if(!value) {
@@ -991,6 +1035,19 @@ Value *expand_get_value(str *content, Value *dict, Value *global_dict, Token *_t
                             todo();
                     }
                 } break;
+                case TOKEN_TYPE_less: {
+                    Value *rhs = expand_get_value(content, global_dict, global_dict, NULL);
+
+                    switch(rhs->kind) {
+                        case KIND_NUMBER: {
+                            value_free(rhs);
+                            return value_boolean(lhs < rhs->as.number);
+                        } break;
+                        default:
+                            todo();
+                    }
+
+                } break;
                 case TOKEN_TYPE_EOF: {
                     return value_number(lhs);
                 } break;
@@ -1040,9 +1097,9 @@ void value_expand(str_builder *sb, Value *value) {
             // __mem_pos -= pos;
 
             str_builder_append(sb, (str) {
-                mem + pos,
-                cap - pos
-            });
+                    mem + pos,
+                    cap - pos
+                    });
         } break;
         default:
             todo();
@@ -1055,14 +1112,34 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
 
         str before, content, rest;
         if(find_content(input, &before, &content, &rest)) {
-            str_builder_append(sb, before);
-            input = rest;
 
             Token token = content_chop_token(&content);
+
+            if(token.type == TOKEN_TYPE_minus) {
+                token = content_chop_token(&content);
+                before = str_trim_right(before);
+            } else {
+            }
+
+            str_builder_append(sb, before);
+            input = rest;
 
             switch(token.type) {
                 case TOKEN_TYPE_if: {
                     Value *value = expand_get_value(&content, dict, dict, NULL);
+
+                    b8 trim_after_prefix = False;
+
+                    token = content_chop_token(&content);
+                    switch(token.type) {
+                        case TOKEN_TYPE_minus: {
+                            trim_after_prefix = True;
+                        } break;
+                        case TOKEN_TYPE_EOF: {
+                        } break;
+                        default:
+                            todo();
+                    }
                     content_expect_empty(content);
 
                     b8 good;
@@ -1073,14 +1150,33 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
                     }
 
                     str inner_input;
-                    if(!find_suffix(input, &inner_input, &rest, TOKEN_TYPE_if, TOKEN_TYPE_endif)) {
+                    b8 trim_before_suffix;
+                    b8 trim_after_suffix;
+                    if(!find_suffix(
+                            input, 
+                            &inner_input, 
+                            &rest, 
+                            &trim_before_suffix, 
+                            &trim_after_suffix,
+                            TOKEN_TYPE_if, 
+                            TOKEN_TYPE_endif)) {
                         todo();
                     }
+                    if(trim_after_prefix) {
+                        inner_input = str_trim_left(inner_input);
+                    }
+                    if(trim_before_suffix) {
+                        inner_input = str_trim_right(inner_input);
+                    }
+                    if(trim_after_suffix) {
+                        rest = str_trim_left(rest);
+                    }
+
+                    printf("'"str_fmt"'\n", str_arg(inner_input));
 
                     if(good) {
                         expand(sb, inner_input, dict);
                     }
-
                     input = rest;
                 } break;
                 case TOKEN_TYPE_for: {
@@ -1117,8 +1213,46 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
                     Value *iterable = expand_get_value(&content, dict, dict, NULL);
                     if(!iterable) todo();
 
+                    b8 trim_after_prefix = False;
+
+                    token = content_chop_token(&content);
+                    switch(token.type) {
+                        case TOKEN_TYPE_minus: {
+                            trim_after_prefix = True;
+                        } break;
+                        case TOKEN_TYPE_EOF: {
+                        } break;
+                        default:
+                            todo();
+                    }
+
                     content_expect_empty(content);
-            
+
+                    str inner_input;
+                    b8 trim_before_suffix;
+                    b8 trim_after_suffix;
+                    if(!find_suffix(
+                                input,
+                                &inner_input,
+                                &rest,
+                                &trim_before_suffix,
+                                &trim_after_suffix,
+                                TOKEN_TYPE_for,
+                                TOKEN_TYPE_endfor)) {
+                        todo();
+                    }
+                    if(trim_after_prefix) {
+                        inner_input = str_trim_left(inner_input);
+                    }
+                    if(trim_before_suffix) {
+                        inner_input = str_trim_right(inner_input);
+                    }
+                    if(trim_after_suffix) {
+                        rest = str_trim_left(rest);
+                    }
+
+                    printf("'"str_fmt"'\n", str_arg(inner_input));
+
                     switch(iterable->kind) {
                         case KIND_ARRAY: {
 
@@ -1148,16 +1282,6 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
                                 if(value_object_contains_key(dict, index_name)) {
                                     todo();
                                 }
-                            }
-
-                            str inner_input;
-                            if(!find_suffix(
-                                        input,
-                                        &inner_input,
-                                        &rest,
-                                        TOKEN_TYPE_for,
-                                        TOKEN_TYPE_endfor)) {
-                                todo();
                             }
 
                             Value *curr = iterable->as.array;
@@ -1197,7 +1321,7 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
                             }
 
                         } break;
-    
+
                         case KIND_OBJECT: {
 
                             b8 set_key;
@@ -1243,21 +1367,11 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
                                 }
                             }
 
-                            str inner_input;
-                            if(!find_suffix(
-                                        input,
-                                        &inner_input,
-                                        &rest,
-                                        TOKEN_TYPE_for,
-                                        TOKEN_TYPE_endfor)) {
-                                todo();
-                            }
-
                             Value *curr = iterable->as.array;
 
                             u64 index = 0;
                             while(curr) {
-    
+
                                 Value *key_value = curr;
                                 curr = curr->next;
                                 Value *value_value = curr;
@@ -1324,6 +1438,66 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
     return sb;
 }
 
+s32 main(void) {
+
+    String_Builder _sb = {0};
+    if(!nob_read_entire_file("debug_print.c.in", &_sb)) {
+        return 1;
+    }
+
+
+    Value *dict = value_object();
+    Value *structs = value_array();
+
+    {
+        Value *strukt = value_object();
+
+        value_object_push(strukt, str_lit("name"), value_string(str_lit("Person")));
+
+        Value *fields = value_array();
+        {
+            Value *field = value_object();
+
+            value_object_push(field, str_lit("type"), value_string(str_lit("u32")));
+            value_object_push(field, str_lit("name"), value_string(str_lit("age")));
+
+            value_array_push(fields, field);
+        }
+        {
+            Value *field = value_object();
+
+            value_object_push(field, str_lit("type"), value_string(str_lit("char*")));
+            value_object_push(field, str_lit("name"), value_string(str_lit("name")));
+
+            value_array_push(fields, field);
+        }
+        value_object_push(strukt, str_lit("fields"), fields);
+
+        value_array_push(structs, strukt);
+    }
+
+    value_object_push(dict, str_lit("structs"), structs);
+
+    str input = { (u8 *) _sb.items, _sb.count };
+    str_builder sb = {0};
+    expand(&sb, input, dict);
+
+    printf("=======================\n");
+    
+    str_node *node = sb.head;
+    while(node) {
+        printf("'"str_fmt"'\n", str_arg(node->string));
+        node = node->next;
+    }
+
+    printf("=======================\n");
+
+    str output = str_builder_to_str(sb);
+    printf(str_fmt"\n", str_arg(output));
+
+    return 0;
+}
+
 // TODO: allow constructing arrays or objects on the fly ?
 // TODO: dissalow 'for ), elem in elems'
 // TODO: allow constructing ranges 'for number in 0..10' ?
@@ -1331,8 +1505,9 @@ str_builder *expand(str_builder *sb, str input, Value *dict) {
 // after the 'instruction-tag'/'content' => '{{ for elem in elems -}}' ?
 // TODO: make arrays store the values in correct order - not reverse order ?
 // TODO: make objects constant access ?
+// TODO: add proper errors ?
 
-s32 main(void) {
+s32 main1(void) {
 
     Value *tests = value_array();
 
@@ -1343,27 +1518,27 @@ s32 main(void) {
                     "{{ endfor }}"
                     ));
         Value *expected = value_string(str_lit(
-            "Hello, bar = bazz (0)!\n"
-            "Hello, foo = bar (1)!\n"
-        ));
-    
+                    "Hello, bar = bazz (0)!\n"
+                    "Hello, foo = bar (1)!\n"
+                    ));
+
         Value *data = value_object(); 
-    
+
         Value *context = value_object_push(
-            value_object(),
-            str_lit("data"),
-            data
-            );
+                value_object(),
+                str_lit("data"),
+                data
+                );
 
         value_object_push(
-            data,
-            str_lit("foo"),
-            value_string(str_lit("bar")));
+                data,
+                str_lit("foo"),
+                value_string(str_lit("bar")));
 
         value_object_push(
-            data,
-            str_lit("bar"),
-            value_string(str_lit("bazz")));
+                data,
+                str_lit("bar"),
+                value_string(str_lit("bazz")));
 
         value_array_push(
                 tests,
@@ -1378,27 +1553,27 @@ s32 main(void) {
                     "{{ endfor }}"
                     ));
         Value *expected = value_string(str_lit(
-            "Hello, bazz!\n"
-            "Hello, bar!\n"
-        ));
-    
+                    "Hello, bazz!\n"
+                    "Hello, bar!\n"
+                    ));
+
         Value *data = value_object(); 
-    
+
         Value *context = value_object_push(
-            value_object(),
-            str_lit("data"),
-            data
-            );
+                value_object(),
+                str_lit("data"),
+                data
+                );
 
         value_object_push(
-            data,
-            str_lit("foo"),
-            value_string(str_lit("bar")));
+                data,
+                str_lit("foo"),
+                value_string(str_lit("bar")));
 
         value_object_push(
-            data,
-            str_lit("bar"),
-            value_string(str_lit("bazz")));
+                data,
+                str_lit("bar"),
+                value_string(str_lit("bazz")));
 
         value_array_push(
                 tests,
@@ -1413,27 +1588,27 @@ s32 main(void) {
                     "{{ endfor }}"
                     ));
         Value *expected = value_string(str_lit(
-            "Hello, bar!\n"
-            "Hello, foo!\n"
-        ));
-    
+                    "Hello, bar!\n"
+                    "Hello, foo!\n"
+                    ));
+
         Value *data = value_object(); 
-    
+
         Value *context = value_object_push(
-            value_object(),
-            str_lit("data"),
-            data
-            );
+                value_object(),
+                str_lit("data"),
+                data
+                );
 
         value_object_push(
-            data,
-            str_lit("foo"),
-            value_string(str_lit("bar")));
+                data,
+                str_lit("foo"),
+                value_string(str_lit("bar")));
 
         value_object_push(
-            data,
-            str_lit("bar"),
-            value_string(str_lit("bazz")));
+                data,
+                str_lit("bar"),
+                value_string(str_lit("bazz")));
 
         value_array_push(
                 tests,
@@ -1448,27 +1623,27 @@ s32 main(void) {
                     "{{ endfor }}"
                     ));
         Value *expected = value_string(str_lit(
-            "Hello, bar = bazz!\n"
-            "Hello, foo = bar!\n"
-        ));
-    
+                    "Hello, bar = bazz!\n"
+                    "Hello, foo = bar!\n"
+                    ));
+
         Value *data = value_object(); 
-    
+
         Value *context = value_object_push(
-            value_object(),
-            str_lit("data"),
-            data
-            );
+                value_object(),
+                str_lit("data"),
+                data
+                );
 
         value_object_push(
-            data,
-            str_lit("foo"),
-            value_string(str_lit("bar")));
+                data,
+                str_lit("foo"),
+                value_string(str_lit("bar")));
 
         value_object_push(
-            data,
-            str_lit("bar"),
-            value_string(str_lit("bazz")));
+                data,
+                str_lit("bar"),
+                value_string(str_lit("bazz")));
 
         value_array_push(
                 tests,
