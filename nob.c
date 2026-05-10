@@ -11,7 +11,10 @@ int main(int argc, char **argv)
 
     Cmd cmd = {0};
 
-    cmd_append(&cmd, "cc", "-Wall", "-Wextra", "-o", "main", "main.c");
+    nob_cc(&cmd);
+    nob_cc_flags(&cmd);
+    nob_cc_output(&cmd, "main");
+    cmd_append(&cmd, "main.c");
     if (!cmd_run(&cmd)) return 1;
     
     if(0 < argc) {
